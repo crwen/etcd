@@ -279,6 +279,7 @@ func (rc *raftNode) startRaft() {
 	}
 	rc.snapshotter = snap.New(zap.NewExample(), rc.snapdir)
 
+	// 重放 wal
 	oldwal := wal.Exist(rc.waldir)
 	rc.wal = rc.replayWAL()
 
@@ -322,7 +323,9 @@ func (rc *raftNode) startRaft() {
 		}
 	}
 
+	// 监听停止事件
 	go rc.serveRaft()
+	// 监听  raft 相关的 channel，接收并处理
 	go rc.serveChannels()
 }
 
@@ -414,6 +417,7 @@ func (rc *raftNode) serveChannels() {
 	defer ticker.Stop()
 
 	// send proposals over raft
+	// 监听 proposal与 confChange 并处理
 	go func() {
 		confChangeCount := uint64(0)
 
@@ -448,6 +452,10 @@ func (rc *raftNode) serveChannels() {
 			rc.node.Tick()
 
 		// store raft entries to wal, then publish over commit channel
+		// 处理 Ready，写 wal --> 保存 snapshot 到稳定存储 --> 添加 entries --> 发送 message
+		// --> 将 committed entries 写入 channel，让服务处理
+		// --> 查看是否需要触发快照
+		// --> Advance()，表示可以处理下一批
 		case rd := <-rc.node.Ready():
 			rc.wal.Save(rd.HardState, rd.Entries)
 			if !raft.IsEmptySnap(rd.Snapshot) {
@@ -457,6 +465,7 @@ func (rc *raftNode) serveChannels() {
 			}
 			rc.raftStorage.Append(rd.Entries)
 			rc.transport.Send(rd.Messages)
+			// 将 committed entries 写入 channel，让服务处理(apply)
 			applyDoneC, ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries))
 			if !ok {
 				rc.stop()
@@ -476,6 +485,7 @@ func (rc *raftNode) serveChannels() {
 	}
 }
 
+// 监听停止事件，让 raft 服务及时停止
 func (rc *raftNode) serveRaft() {
 	url, err := url.Parse(rc.peers[rc.id-1])
 	if err != nil {

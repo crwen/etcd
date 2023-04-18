@@ -70,6 +70,7 @@ func (s *kvstore) Propose(k string, v string) {
 	s.proposeC <- buf.String()
 }
 
+// 处理 commit
 func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
 	for commit := range commitC {
 		if commit == nil {

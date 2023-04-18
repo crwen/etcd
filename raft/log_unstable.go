@@ -24,8 +24,10 @@ type unstable struct {
 	// the incoming unstable snapshot, if any.
 	snapshot *pb.Snapshot
 	// all entries that have not yet been written to storage.
+	// 仅在接收发送过来的快照时存在
 	entries []pb.Entry
-	offset  uint64
+	// entries 一条数据的索引
+	offset uint64
 
 	logger Logger
 }

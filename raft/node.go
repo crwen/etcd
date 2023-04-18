@@ -53,11 +53,13 @@ type Ready struct {
 	// The current volatile state of a Node.
 	// SoftState will be nil if there is no update.
 	// It is not required to consume or store SoftState.
+	// 不用写入稳固存储，包括 Leader ID、状态
 	*SoftState
 
 	// The current state of a Node to be saved to stable storage BEFORE
 	// Messages are sent.
 	// HardState will be equal to empty state if there is no update.
+	// 将会写入到稳固存储中，包括 Term、Vote、Commit
 	pb.HardState
 
 	// ReadStates can be used for node to serve linearizable read requests locally

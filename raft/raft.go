@@ -388,6 +388,7 @@ func (r *raft) send(m pb.Message) {
 		m.From = r.id
 	}
 	if m.Type == pb.MsgVote || m.Type == pb.MsgVoteResp || m.Type == pb.MsgPreVote || m.Type == pb.MsgPreVoteResp {
+		// 选举、预选举相关
 		if m.Term == 0 {
 			// All {pre-,}campaign messages need to have the term set when
 			// sending.
@@ -583,12 +584,14 @@ func (r *raft) advance(rd Ready) {
 // the commit index changed (in which case the caller should call
 // r.bcastAppend).
 func (r *raft) maybeCommit() bool {
+	// 找到能够提交的最高索引
 	mci := r.prs.Committed()
 	return r.raftLog.maybeCommit(mci, r.Term)
 }
 
 func (r *raft) reset(term uint64) {
 	if r.Term != term {
+		// 针对 becomeFollower 的情况
 		r.Term = term
 		r.Vote = None
 	}
@@ -647,6 +650,7 @@ func (r *raft) tickElection() {
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
+		// 发送 Hub 消息
 		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
 	}
 }
@@ -673,6 +677,7 @@ func (r *raft) tickHeartbeat() {
 
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
+		// 处理心跳
 		r.Step(pb.Message{From: r.id, Type: pb.MsgBeat})
 	}
 }
@@ -777,6 +782,7 @@ func (r *raft) hup(t CampaignType) {
 // campaign transitions the raft instance to candidate state. This must only be
 // called after verifying that this is a legitimate transition.
 func (r *raft) campaign(t CampaignType) {
+	// 判断是否能够发起选举，需要满足条件
 	if !r.promotable() {
 		// This path should not be hit (callers are supposed to check), but
 		// better safe than sorry.
@@ -785,11 +791,13 @@ func (r *raft) campaign(t CampaignType) {
 	var term uint64
 	var voteMsg pb.MessageType
 	if t == campaignPreElection {
+		// 预选举
 		r.becomePreCandidate()
 		voteMsg = pb.MsgPreVote
 		// PreVote RPCs are sent for the next term before we've incremented r.Term.
 		term = r.Term + 1
 	} else {
+		// 选举: 成为 Candidate; term ++; 为自己投票
 		r.becomeCandidate()
 		voteMsg = pb.MsgVote
 		term = r.Term
@@ -798,6 +806,7 @@ func (r *raft) campaign(t CampaignType) {
 		// We won the election after voting for ourselves (which must mean that
 		// this is a single-node cluster). Advance to the next state.
 		if t == campaignPreElection {
+			// 预选举通过，开始选举
 			r.campaign(campaignElection)
 		} else {
 			r.becomeLeader()
@@ -824,6 +833,7 @@ func (r *raft) campaign(t CampaignType) {
 		if t == campaignTransfer {
 			ctx = []byte(t)
 		}
+		// 发送投票请求
 		r.send(pb.Message{Term: term, To: id, Type: voteMsg, Index: r.raftLog.lastIndex(), LogTerm: r.raftLog.lastTerm(), Context: ctx})
 	}
 }
@@ -834,7 +844,9 @@ func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int, rejected 
 	} else {
 		r.logger.Infof("%x received %s rejection from %x at term %d", r.id, t, id, r.Term)
 	}
+	// 记录选票(v == true ? vote : reject)
 	r.prs.RecordVote(id, v)
+	// 记录票数（包括同意的和拒绝的）以及结果
 	return r.prs.TallyVotes()
 }
 
@@ -843,8 +855,12 @@ func (r *raft) Step(m pb.Message) error {
 	switch {
 	case m.Term == 0:
 		// local message
+		// 本地：选举消息、...
 	case m.Term > r.Term:
+		// 消息的 term 比自己当前的 term 还大的情况
+		// PreVote, response
 		if m.Type == pb.MsgVote || m.Type == pb.MsgPreVote {
+			// 对应于 campaignTransfer，即 Leader 指定该 Server 成为 Leader 的情况
 			force := bytes.Equal(m.Context, []byte(campaignTransfer))
 			inLease := r.checkQuorum && r.lead != None && r.electionElapsed < r.electionTimeout
 			if !force && inLease {
@@ -856,6 +872,7 @@ func (r *raft) Step(m pb.Message) error {
 			}
 		}
 		switch {
+		// 预选举以及预选举响应(没有拒绝的)，不需要处理
 		case m.Type == pb.MsgPreVote:
 			// Never change our term in response to a PreVote
 		case m.Type == pb.MsgPreVoteResp && !m.Reject:
@@ -865,6 +882,7 @@ func (r *raft) Step(m pb.Message) error {
 			// rejected our vote so we should become a follower at the new
 			// term.
 		default:
+			// 其他情况表明其他 Server 有更高的 term，所以自己需要转化为 follower
 			r.logger.Infof("%x [term: %d] received a %s message with higher term from %x [term: %d]",
 				r.id, r.Term, m.Type, m.From, m.Term)
 			if m.Type == pb.MsgApp || m.Type == pb.MsgHeartbeat || m.Type == pb.MsgSnap {
@@ -916,13 +934,16 @@ func (r *raft) Step(m pb.Message) error {
 	switch m.Type {
 	case pb.MsgHup:
 		if r.preVote {
+			// 如果开启了预选举,发送预选举消息
 			r.hup(campaignPreElection)
 		} else {
+			// 否则开始选举
 			r.hup(campaignElection)
 		}
 
 	case pb.MsgVote, pb.MsgPreVote:
 		// We can vote if this is a repeat of a vote we've already cast...
+		// 判断是否能投票
 		canVote := r.Vote == m.From ||
 			// ...we haven't voted and we don't think there's a leader yet in this term...
 			(r.Vote == None && r.lead == None) ||
@@ -966,6 +987,7 @@ func (r *raft) Step(m pb.Message) error {
 				r.Vote = m.From
 			}
 		} else {
+			// 拒绝投票
 			r.logger.Infof("%x [logterm: %d, index: %d, vote: %x] rejected %s from %x [logterm: %d, index: %d] at term %d",
 				r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.Type, m.From, m.LogTerm, m.Index, r.Term)
 			r.send(pb.Message{To: m.From, Term: r.Term, Type: voteRespMsgType(m.Type), Reject: true})
@@ -1609,6 +1631,7 @@ func (r *raft) restore(s pb.Snapshot) bool {
 
 // promotable indicates whether state machine can be promoted to leader,
 // which is true when its own id is in progress list.
+// 是否被移除、是否为learner、是否还有未被保持到稳定存储中的快照
 func (r *raft) promotable() bool {
 	pr := r.prs.Progress[r.id]
 	return pr != nil && !pr.IsLearner && !r.raftLog.hasPendingSnapshot()

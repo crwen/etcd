@@ -1225,10 +1225,10 @@ func TestStepIgnoreOldTermMsg(t *testing.T) {
 }
 
 // TestHandleMsgApp ensures:
-// 1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
-// 2. If an existing entry conflicts with a new one (same index but different terms),
-//    delete the existing entry and all that follow it; append any new entries not already in the log.
-// 3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
+//  1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
+//  2. If an existing entry conflicts with a new one (same index but different terms),
+//     delete the existing entry and all that follow it; append any new entries not already in the log.
+//  3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
 func TestHandleMsgApp(t *testing.T) {
 	tests := []struct {
 		m       pb.Message
@@ -2818,7 +2818,7 @@ func TestRestoreWithLearner(t *testing.T) {
 	}
 }
 
-/// Tests if outgoing voter can receive and apply snapshot correctly.
+// / Tests if outgoing voter can receive and apply snapshot correctly.
 func TestRestoreWithVotersOutgoing(t *testing.T) {
 	s := pb.Snapshot{
 		Metadata: pb.SnapshotMetadata{
@@ -4850,4 +4850,50 @@ func newTestRawNode(id uint64, election, heartbeat int, storage Storage) *RawNod
 		panic(err)
 	}
 	return rn
+}
+
+func TestHeartbeatUpdateCommit2AB(t *testing.T) {
+	tests := []struct {
+		failCnt    int
+		successCnt int
+	}{
+		{1, 1},
+		{5, 3},
+		{5, 10},
+	}
+	for i, tt := range tests {
+		defaultLogger.EnableDebug()
+		sm1 := newTestRaft(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+		sm2 := newTestRaft(2, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+		sm3 := newTestRaft(3, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+		nt := newNetwork(sm1, sm2, sm3)
+		nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
+		nt.isolate(1)
+		// propose log to old leader should fail
+		for i := 0; i < tt.failCnt; i++ {
+			nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{}}})
+		}
+		if sm1.raftLog.committed > 1 {
+			t.Fatalf("#%d: unexpected commit: %d", i, sm1.raftLog.committed)
+		}
+		// propose log to cluster should success
+		nt.send(pb.Message{From: 2, To: 2, Type: pb.MsgHup})
+		for i := 0; i < tt.successCnt; i++ {
+			nt.send(pb.Message{From: 2, To: 2, Type: pb.MsgProp, Entries: []pb.Entry{{}}})
+		}
+		wCommit := uint64(2 + tt.successCnt) // 2 elctions
+		if sm2.raftLog.committed != wCommit {
+			t.Fatalf("#%d: expected sm2 commit: %d, got: %d", i, wCommit, sm2.raftLog.committed)
+		}
+		if sm3.raftLog.committed != wCommit {
+			t.Fatalf("#%d: expected sm3 commit: %d, got: %d", i, wCommit, sm3.raftLog.committed)
+		}
+
+		nt.recover()
+		nt.ignore(pb.MsgApp)
+		nt.send(pb.Message{From: 2, To: 2, Type: pb.MsgBeat})
+		if sm1.raftLog.committed > 1 {
+			t.Fatalf("#%d: expected sm1 commit: 1, got: %d", i, sm1.raftLog.committed)
+		}
+	}
 }
